@@ -15,19 +15,10 @@ URL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Common platforms supported by the bot
-SUPPORTED_DOMAINS = [
-    "instagram.com", "instagr.am",
-    "youtube.com", "youtu.be",
-    "facebook.com", "fb.watch", "fb.com",
-    "twitter.com", "x.com",
-    "pinterest.com", "pin.it",
-    "reddit.com", "redd.it",
-    "tiktok.com",
-    "snapchat.com",
-    "telegram.org", "t.me",
-    "vimeo.com", "soundcloud.com", "twitch.tv"
-]
+INSTAGRAM_SHORTCODE_PATTERN = re.compile(
+    r'(?:https?://)?(?:www\.)?instagram\.com/(?:reel|p|tv)/([A-Za-z0-9_-]+)',
+    re.IGNORECASE
+)
 
 
 def extract_urls(text: str) -> List[str]:
@@ -63,24 +54,32 @@ def format_bytes(num_bytes: Optional[int]) -> str:
 
 class MediaDownloader:
     def __init__(self):
-        self.download_semaphore = asyncio.Semaphore(3)
+        self.download_semaphore = asyncio.Semaphore(4)
 
     def _get_base_ydl_opts(self) -> Dict[str, Any]:
-        """Base options for yt-dlp."""
+        """Ultra-fast, robust options for yt-dlp with bot-detection bypass."""
         opts = {
             'quiet': True,
             'no_warnings': True,
             'ignoreerrors': False,
             'skip_download': True,
             'noplaylist': True,
-            'socket_timeout': 30,
-            'retries': 3,
-            # Mimic modern browser user agent
+            'socket_timeout': 10,  # Fast 10s timeout to prevent freezing
+            'retries': 2,
+            # Bypass YouTube bot challenge with mobile player client
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios'],
+                    'player_skip': ['webpage', 'configs', 'js']
+                },
+                'instagram': {
+                    'include_logged_out': True,
+                }
+            },
             'http_headers': {
                 'User-Agent': (
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/124.0.0.0 Safari/537.36'
+                    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) '
+                    'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1'
                 ),
                 'Accept-Language': 'en-US,en;q=0.9',
             }
@@ -89,36 +88,86 @@ class MediaDownloader:
             opts['cookiefile'] = COOKIES_FILE
         return opts
 
+    async def _extract_instagram_fallback(self, url: str) -> Optional[Dict[str, Any]]:
+        """Fallback extractor using parth-dl or direct public GraphQL for Instagram reels."""
+        shortcode_match = INSTAGRAM_SHORTCODE_PATTERN.search(url)
+        if not shortcode_match:
+            return None
+
+        shortcode = shortcode_match.group(1)
+        logger.info(f"Attempting Instagram fallback extraction for shortcode: {shortcode}")
+
+        def _run_parth():
+            try:
+                from parth_dl.extractors import MediaExtractor
+                extractor = MediaExtractor()
+                return extractor.extract(url)
+            except Exception as e:
+                logger.warning(f"parth-dl extraction failed: {e}")
+                return None
+
+        result = await asyncio.to_thread(_run_parth)
+        if result and result.get("entries"):
+            entry = result["entries"][0]
+            direct_video_url = entry.get("url")
+            thumbnail = entry.get("thumbnail")
+            title = entry.get("title") or f"Instagram Reel ({shortcode})"
+            uploader = entry.get("uploader") or "Instagram Creator"
+
+            return {
+                "url": url,
+                "direct_download_url": direct_video_url,
+                "title": title[:60],
+                "duration": entry.get("duration", 0),
+                "duration_str": format_duration(entry.get("duration")),
+                "thumbnail": thumbnail,
+                "uploader": uploader,
+                "extractor": "Instagram",
+                "is_image": not bool(entry.get("is_video", True)),
+                "image_url": entry.get("url") if not entry.get("is_video", True) else None,
+                "qualities": ["best"],
+                "raw_info": entry
+            }
+
+        return None
+
     async def fetch_media_info(self, url: str) -> Dict[str, Any]:
         """
-        Extract media information without downloading the actual media file.
-        Returns metadata: title, duration, resolutions available, thumbnail, is_photo, etc.
+        Extract media information without downloading the full media file.
+        Uses primary yt-dlp engine with automated Instagram fallback.
         """
+        # Quick check for Instagram
+        is_instagram = "instagram.com" in url.lower() or "instagr.am" in url.lower()
+
+        # Try primary yt-dlp extraction
         def _extract():
             opts = self._get_base_ydl_opts()
             with yt_dlp.YoutubeDL(opts) as ydl:
-                try:
-                    info = ydl.extract_info(url, download=False)
-                    return info
-                except Exception as e:
-                    # Retry with generic extractor or raise
-                    raise e
+                return ydl.extract_info(url, download=False)
 
+        info = None
         try:
             info = await asyncio.to_thread(_extract)
         except Exception as e:
-            logger.error(f"Error extracting info for {url}: {e}")
-            raise
+            logger.warning(f"Primary yt-dlp extraction failed for {url}: {e}")
+            # If Instagram, try dedicated Instagram fallback
+            if is_instagram:
+                fallback_info = await self._extract_instagram_fallback(url)
+                if fallback_info:
+                    return fallback_info
+            raise e
 
         if not info:
-            raise ValueError("Could not extract any media information from this URL.")
+            if is_instagram:
+                fallback_info = await self._extract_instagram_fallback(url)
+                if fallback_info:
+                    return fallback_info
+            raise ValueError("Could not extract any media information from this link.")
 
-        # If it's a playlist or multiple entries, pick the first entry
         if 'entries' in info and info['entries']:
             info = info['entries'][0]
 
         title = info.get('title') or "Media File"
-        # Truncate title if too long
         if len(title) > 60:
             title = title[:57] + "..."
 
@@ -127,7 +176,6 @@ class MediaDownloader:
         uploader = info.get('uploader') or info.get('channel') or "Unknown"
         extractor = info.get('extractor_key') or "Web"
 
-        # Check if it's an image post (common on Pinterest, Instagram photo posts)
         is_image = False
         image_url = None
         ext = info.get('ext', '')
@@ -135,7 +183,6 @@ class MediaDownloader:
             is_image = True
             image_url = info.get('url') or thumbnail
 
-        # Collect available resolutions
         formats = info.get('formats') or []
         available_heights = set()
         max_height = 0
@@ -147,19 +194,16 @@ class MediaDownloader:
                 if h > max_height:
                     max_height = h
 
-        # Organize standard resolutions
         standard_qualities = [1080, 720, 480, 360]
         offered_qualities = []
 
         if max_height > 0:
             for q in standard_qualities:
-                if max_height >= q - 20:  # slight leeway for 718p or 1072p
+                if max_height >= q - 20:
                     offered_qualities.append(q)
-            # If no standard quality matched but height exists
             if not offered_qualities:
                 offered_qualities.append(max_height)
         else:
-            # Fallback if height info is missing from format metadata
             offered_qualities = ["best"]
 
         return {
@@ -180,15 +224,38 @@ class MediaDownloader:
         self,
         url: str,
         media_type: str = "video",
-        quality: Any = "best"
+        quality: Any = "best",
+        direct_download_url: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Download media asynchronously.
-        media_type: 'video' or 'audio' or 'photo'
-        quality: height int (e.g. 1080, 720, 480, 360) or 'best'
+        If direct_download_url is provided (from Instagram fallback), downloads stream directly.
         """
         file_id = uuid.uuid4().hex[:10]
         output_template = str(TEMP_DOWNLOAD_DIR / f"{file_id}_%(title).50s.%(ext)s")
+
+        # Fast direct download path if direct CDN link is provided
+        if direct_download_url and media_type == "video":
+            dest_file = str(TEMP_DOWNLOAD_DIR / f"{file_id}_video.mp4")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(direct_download_url, timeout=60) as resp:
+                    if resp.status == 200:
+                        with open(dest_file, "wb") as f:
+                            while True:
+                                chunk = await resp.content.read(1024 * 64)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                        file_size = os.path.getsize(dest_file)
+                        return {
+                            "file_path": dest_file,
+                            "file_size": file_size,
+                            "file_size_mb": file_size / (1024 * 1024),
+                            "title": "Instagram Video",
+                            "duration": 0,
+                            "uploader": "Instagram",
+                            "thumbnail": None
+                        }
 
         def _download():
             ydl_opts = {
@@ -196,13 +263,17 @@ class MediaDownloader:
                 'quiet': True,
                 'no_warnings': True,
                 'noplaylist': True,
-                'socket_timeout': 60,
-                'retries': 5,
+                'socket_timeout': 30,
+                'retries': 3,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'ios'],
+                    }
+                },
                 'http_headers': {
                     'User-Agent': (
-                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                        'AppleWebKit/537.36 (KHTML, like Gecko) '
-                        'Chrome/124.0.0.0 Safari/537.36'
+                        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) '
+                        'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1'
                     ),
                 }
             }
@@ -220,7 +291,6 @@ class MediaDownloader:
                     }],
                 })
             else:
-                # Video download
                 if quality == "best":
                     ydl_opts['format'] = (
                         'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'
@@ -240,15 +310,12 @@ class MediaDownloader:
                 if 'entries' in info and info['entries']:
                     info = info['entries'][0]
 
-                # Find the downloaded file
                 downloaded_file = ydl.prepare_filename(info)
 
                 if media_type == "audio":
-                    # After audio extraction, extension changes to .mp3
                     base, _ = os.path.splitext(downloaded_file)
                     downloaded_file = f"{base}.mp3"
                 else:
-                    # In case of merge_output_format
                     base, _ = os.path.splitext(downloaded_file)
                     if os.path.exists(f"{base}.mp4"):
                         downloaded_file = f"{base}.mp4"
@@ -286,7 +353,7 @@ class MediaDownloader:
         dest_path = TEMP_DOWNLOAD_DIR / f"img_{file_id}.{ext}"
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(image_url, timeout=30) as resp:
+            async with session.get(image_url, timeout=20) as resp:
                 if resp.status == 200:
                     data = await resp.read()
                     with open(dest_path, "wb") as f:
