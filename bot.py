@@ -405,10 +405,13 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         logger.error(f"Failed to fetch media info for {target_url}: {e}")
         error_msg = str(e)
-        if "Private video" in error_msg or "login" in error_msg.lower() or "forbidden" in error_msg.lower() or "rate-limit" in error_msg.lower():
-            friendly_err = f"🔒 {to_stylish('ᴛʜɪs ᴄᴏɴᴛᴇɴᴛ ʀᴇǫᴜɪʀᴇs ʟᴏɢɪɴ ᴏʀ ɪs ᴘʀɪᴠᴀᴛᴇ.')}"
+        if any(k in error_msg.lower() for k in ["sign in", "not a bot", "private video", "login", "forbidden", "rate-limit"]):
+            friendly_err = (
+                f"🔒 <b>{to_stylish('ᴛʜɪs ᴄᴏɴᴛᴇɴᴛ ʀᴇǫᴜɪʀᴇs ʟᴏɢɪɴ ᴏʀ ɪs ᴘʀɪᴠᴀᴛᴇ.')}</b>\n\n"
+                f"🍪 <i>{to_stylish('ᴏᴡɴᴇʀ ᴄᴀɴ ᴜᴘʟᴏᴀᴅ cookies.txt ᴠɪᴀ /setcookies ᴛᴏ ᴜɴʟᴏᴄᴋ ᴀʟʟ ʀᴇsᴛʀɪᴄᴛɪᴏɴs 100%!')}</i>"
+            )
         else:
-            friendly_err = f"⚠️ {to_stylish('ᴄᴏᴜʟᴅ ɴᴏᴛ ᴇxᴛʀᴀᴄᴛ ᴍᴇᴅɪᴀ. ᴍᴀᴋᴇ sᴜʀᴇ ᴛʜᴇ ʟɪɴᴋ ɪs ᴘᴜʙʟɪᴄ ᴀɴᴅ ᴠᴀʟɪᴅ.')}"
+            friendly_err = f"⚠️ <b>{to_stylish('ᴄᴏᴜʟᴅ ɴᴏᴛ ᴇxᴛʀᴀᴄᴛ ᴍᴇᴅɪᴀ. ᴍᴀᴋᴇ sᴜʀᴇ ᴛʜᴇ ʟɪɴᴋ ɪs ᴘᴜʙʟɪᴄ ᴀɴᴅ ᴠᴀʟɪᴅ.')}</b>"
 
         try:
             await status_msg.edit_text(

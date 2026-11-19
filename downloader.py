@@ -201,7 +201,10 @@ class MediaDownloader:
             'skip_download': True,
             'noplaylist': True,
             'socket_timeout': 15,
-            'retries': 2,
+            'retries': 3,
+            'source_address': '0.0.0.0',
+            'geo_bypass': True,
+            'nocheckcertificate': True,
             # YouTube: Use tv_embedded & mweb to avoid PO Token requirement
             'extractor_args': {
                 'youtube': {
@@ -367,6 +370,9 @@ class MediaDownloader:
                 'noplaylist': True,
                 'socket_timeout': 30,
                 'retries': 3,
+                'source_address': '0.0.0.0',
+                'geo_bypass': True,
+                'nocheckcertificate': True,
                 'extractor_args': {
                     'youtube': {
                         'player_client': ['tv_embedded', 'mweb', 'android', 'ios'],
