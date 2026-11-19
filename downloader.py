@@ -200,6 +200,11 @@ def extract_snapsave_media(url: str) -> Optional[Dict[str, Any]]:
             "qualities": ["best"],
             "raw_info": {}
         }
+    except Exception as e:
+        logger.warning(f"SnapSave extraction exception: {e}")
+        return None
+
+
 def extract_snapchat_media(url: str) -> Optional[Dict[str, Any]]:
     """Extracts direct CDN MP4 video from Snapchat Spotlight."""
     try:

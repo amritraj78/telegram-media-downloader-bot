@@ -1,8 +1,10 @@
 import os
+import re
 import time
 import html
 import asyncio
 import logging
+import urllib.request
 from typing import Dict, Any, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatAction
