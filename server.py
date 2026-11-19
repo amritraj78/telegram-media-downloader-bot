@@ -195,7 +195,8 @@ async def api_test_handler(request):
     if not url:
         return web.json_response({"error": "Missing url parameter"}, status=400)
 
-    from downloader import downloader, sanitize_url, extract_snapsave_media
+    from downloader import MediaDownloader, sanitize_url, extract_snapsave_media
+    downloader = MediaDownloader()
     clean_url = sanitize_url(url)
     result = {"url": url, "clean_url": clean_url}
 
