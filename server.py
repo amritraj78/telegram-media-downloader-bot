@@ -189,11 +189,74 @@ async def root_handler(request):
     return web.Response(text=html_content, content_type="text/html")
 
 
+async def api_test_handler(request):
+    """Test endpoint to verify extraction on Koyeb live across all platforms."""
+    url = request.query.get("url", "")
+    if not url:
+        return web.json_response({"error": "Missing url parameter"}, status=400)
+
+    from downloader import downloader, sanitize_url, extract_snapsave_media
+    clean_url = sanitize_url(url)
+    result = {"url": url, "clean_url": clean_url}
+
+    # Test SnapSave if Instagram or Facebook
+    if "instagram.com" in clean_url or "facebook.com" in clean_url:
+        try:
+            import urllib.request, urllib.parse, re
+            from downloader import _decode_snapsave
+            data = urllib.parse.urlencode({'url': clean_url}).encode('utf-8')
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Origin': 'https://snapsave.app',
+                'Referer': 'https://snapsave.app/'
+            }
+            req = urllib.request.Request('https://snapsave.app/action.php', data=data, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                html_text = resp.read().decode('utf-8', errors='ignore')
+            m = re.search(r'\(\"([^\"]+)\",\s*(\d+),\s*\"([^\"]+)\",\s*(\d+),\s*(\d+),\s*(\d+)\)', html_text)
+            if m:
+                h, u, n, t, e, _ = m.groups()
+                decoded = _decode_snapsave(h, int(u), n, int(t), int(e))
+                rapid = re.findall(r'https://d\.rapidcdn\.app/v2\?token=[^\s\"\'<>]+', decoded)
+                result["snapsave"] = {
+                    "matched": True,
+                    "rapid_found": len(rapid) > 0,
+                    "has_error": "Error:" in decoded,
+                    "preview": decoded[:200]
+                }
+            else:
+                result["snapsave"] = {"matched": False, "preview": html_text[:200]}
+        except Exception as exc:
+            result["snapsave"] = {"error": str(exc)}
+
+    # Test fetch_media_info
+    try:
+        info = await downloader.fetch_media_info(clean_url)
+        result["fetch"] = {
+            "status": "success",
+            "title": info.get("title"),
+            "duration": info.get("duration"),
+            "extractor": info.get("extractor"),
+            "qualities": info.get("qualities"),
+            "is_image": info.get("is_image"),
+            "direct_download_url": bool(info.get("direct_download_url"))
+        }
+    except Exception as exc:
+        result["fetch"] = {
+            "status": "error",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc)
+        }
+
+    return web.json_response(result)
+
+
 async def start_web_server():
     """Starts the background aiohttp web server on the assigned port."""
     app = web.Application()
     app.router.add_get("/", root_handler)
     app.router.add_get("/health", health_check_handler)
+    app.router.add_get("/api/test", api_test_handler)
 
     runner = web.AppRunner(app)
     await runner.setup()
