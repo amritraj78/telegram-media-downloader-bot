@@ -3,6 +3,8 @@ import re
 import uuid
 import asyncio
 import logging
+import urllib.request
+import urllib.parse
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 import yt_dlp
@@ -15,8 +17,13 @@ URL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-INSTAGRAM_SHORTCODE_PATTERN = re.compile(
+INSTAGRAM_PATTERN = re.compile(
     r'(?:https?://)?(?:www\.)?instagram\.com/(?:reel|p|tv)/([A-Za-z0-9_-]+)',
+    re.IGNORECASE
+)
+
+FACEBOOK_PATTERN = re.compile(
+    r'(?:https?://)?(?:www\.|m\.)?(?:facebook\.com|fb\.watch)/',
     re.IGNORECASE
 )
 
@@ -52,25 +59,123 @@ def format_bytes(num_bytes: Optional[int]) -> str:
     return f"{num_bytes:.1f} TB"
 
 
+def _decode_snapsave(h: str, u: int, n: str, t: int, e: int) -> str:
+    """Pure Python implementation of SnapSave JS de-obfuscation unpacker."""
+    charset = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/'
+
+    def _e23c(d_val, e_val, f_val):
+        h_chars = charset[:e_val]
+        i_chars = charset[:f_val]
+        j_val = 0
+        for c, b in enumerate(reversed(d_val)):
+            idx = h_chars.find(b)
+            if idx != -1:
+                j_val += idx * (e_val ** c)
+        k_str = ''
+        while j_val > 0:
+            k_str = i_chars[j_val % f_val] + k_str
+            j_val //= f_val
+        return k_str or '0'
+
+    res = []
+    i = 0
+    delimiter = n[e]
+    while i < len(h):
+        s = ''
+        while i < len(h) and h[i] != delimiter:
+            s += h[i]
+            i += 1
+        i += 1
+        for j in range(len(n)):
+            s = s.replace(n[j], str(j))
+        if s:
+            char_code = int(_e23c(s, e, 10)) - t
+            res.append(chr(char_code))
+    return ''.join(res)
+
+
+def extract_snapsave_media(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Extracts direct CDN media URLs via SnapSave engine.
+    Bypasses Instagram & Facebook datacenter IP blocks completely.
+    """
+    try:
+        data = urllib.parse.urlencode({'url': url}).encode('utf-8')
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+            ),
+            'Origin': 'https://snapsave.app',
+            'Referer': 'https://snapsave.app/'
+        }
+        req = urllib.request.Request('https://snapsave.app/action.php', data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            html_text = resp.read().decode('utf-8', errors='ignore')
+
+        match = re.search(r'\(\"([^\"]+)\",\s*(\d+),\s*\"([^\"]+)\",\s*(\d+),\s*(\d+),\s*(\d+)\)', html_text)
+        if not match:
+            return None
+
+        h, u, n, t, e, _ = match.groups()
+        decoded = _decode_snapsave(h, int(u), n, int(t), int(e))
+
+        # Check for error in response
+        if "Error:" in decoded:
+            logger.warning(f"SnapSave returned error for {url}")
+            return None
+
+        # Look for rapidcdn or direct download links
+        rapid_urls = re.findall(r'https://d\.rapidcdn\.app/v2\?token=[^\s\"\'<>]+', decoded)
+        thumb_urls = re.findall(r'https://d\.rapidcdn\.app/thumb\?token=[^\s\"\'<>]+', decoded)
+
+        # Fallback to any direct video href
+        if not rapid_urls:
+            rapid_urls = re.findall(r'href=\\?\"(https?://[^\s\"\'<>]+)\\?\"', decoded)
+
+        if not rapid_urls:
+            return None
+
+        video_url = rapid_urls[0].replace('\\\\', '').rstrip('\\\"')
+        thumb_url = thumb_urls[0].replace('\\\\', '').rstrip('\\\"') if thumb_urls else None
+
+        return {
+            "url": url,
+            "direct_download_url": video_url,
+            "title": "Social Video",
+            "duration": 0,
+            "duration_str": "HD",
+            "thumbnail": thumb_url,
+            "uploader": "Creator",
+            "extractor": "Instagram/FB",
+            "is_image": False,
+            "image_url": None,
+            "qualities": ["best"],
+            "raw_info": {}
+        }
+    except Exception as e:
+        logger.warning(f"SnapSave extraction exception: {e}")
+        return None
+
+
 class MediaDownloader:
     def __init__(self):
         self.download_semaphore = asyncio.Semaphore(4)
 
     def _get_base_ydl_opts(self) -> Dict[str, Any]:
-        """Ultra-fast, robust options for yt-dlp with bot-detection bypass."""
+        """Options for yt-dlp with mobile player client for YouTube."""
         opts = {
             'quiet': True,
             'no_warnings': True,
             'ignoreerrors': False,
             'skip_download': True,
             'noplaylist': True,
-            'socket_timeout': 10,  # Fast 10s timeout to prevent freezing
+            'socket_timeout': 15,
             'retries': 2,
-            # Bypass YouTube bot challenge with mobile player client
+            # YouTube: Use iOS & mweb clients to avoid PO Token requirement
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'ios'],
-                    'player_skip': ['webpage', 'configs', 'js']
+                    'player_client': ['ios', 'mweb'],
                 },
                 'instagram': {
                     'include_logged_out': True,
@@ -88,58 +193,23 @@ class MediaDownloader:
             opts['cookiefile'] = COOKIES_FILE
         return opts
 
-    async def _extract_instagram_fallback(self, url: str) -> Optional[Dict[str, Any]]:
-        """Fallback extractor using parth-dl or direct public GraphQL for Instagram reels."""
-        shortcode_match = INSTAGRAM_SHORTCODE_PATTERN.search(url)
-        if not shortcode_match:
-            return None
-
-        shortcode = shortcode_match.group(1)
-        logger.info(f"Attempting Instagram fallback extraction for shortcode: {shortcode}")
-
-        def _run_parth():
-            try:
-                from parth_dl.extractors import MediaExtractor
-                extractor = MediaExtractor()
-                return extractor.extract(url)
-            except Exception as e:
-                logger.warning(f"parth-dl extraction failed: {e}")
-                return None
-
-        result = await asyncio.to_thread(_run_parth)
-        if result and result.get("entries"):
-            entry = result["entries"][0]
-            direct_video_url = entry.get("url")
-            thumbnail = entry.get("thumbnail")
-            title = entry.get("title") or f"Instagram Reel ({shortcode})"
-            uploader = entry.get("uploader") or "Instagram Creator"
-
-            return {
-                "url": url,
-                "direct_download_url": direct_video_url,
-                "title": title[:60],
-                "duration": entry.get("duration", 0),
-                "duration_str": format_duration(entry.get("duration")),
-                "thumbnail": thumbnail,
-                "uploader": uploader,
-                "extractor": "Instagram",
-                "is_image": not bool(entry.get("is_video", True)),
-                "image_url": entry.get("url") if not entry.get("is_video", True) else None,
-                "qualities": ["best"],
-                "raw_info": entry
-            }
-
-        return None
-
     async def fetch_media_info(self, url: str) -> Dict[str, Any]:
         """
         Extract media information without downloading the full media file.
-        Uses primary yt-dlp engine with automated Instagram fallback.
+        Uses SnapSave proxy first for Instagram and Facebook, with yt-dlp as fallback.
         """
-        # Quick check for Instagram
-        is_instagram = "instagram.com" in url.lower() or "instagr.am" in url.lower()
+        is_instagram = bool(INSTAGRAM_PATTERN.search(url))
+        is_facebook = bool(FACEBOOK_PATTERN.search(url))
 
-        # Try primary yt-dlp extraction
+        # For Instagram and Facebook: Run SnapSave in parallel or first to bypass datacenter IP blocks!
+        if is_instagram or is_facebook:
+            logger.info(f"Running high-speed SnapSave engine for: {url}")
+            snapsave_result = await asyncio.to_thread(extract_snapsave_media, url)
+            if snapsave_result and snapsave_result.get("direct_download_url"):
+                logger.info("SnapSave successfully extracted direct media URL!")
+                return snapsave_result
+
+        # Primary yt-dlp extraction
         def _extract():
             opts = self._get_base_ydl_opts()
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -150,18 +220,16 @@ class MediaDownloader:
             info = await asyncio.to_thread(_extract)
         except Exception as e:
             logger.warning(f"Primary yt-dlp extraction failed for {url}: {e}")
-            # If Instagram, try dedicated Instagram fallback
-            if is_instagram:
-                fallback_info = await self._extract_instagram_fallback(url)
-                if fallback_info:
-                    return fallback_info
+            # Try SnapSave if not attempted yet
+            snapsave_result = await asyncio.to_thread(extract_snapsave_media, url)
+            if snapsave_result and snapsave_result.get("direct_download_url"):
+                return snapsave_result
             raise e
 
         if not info:
-            if is_instagram:
-                fallback_info = await self._extract_instagram_fallback(url)
-                if fallback_info:
-                    return fallback_info
+            snapsave_result = await asyncio.to_thread(extract_snapsave_media, url)
+            if snapsave_result and snapsave_result.get("direct_download_url"):
+                return snapsave_result
             raise ValueError("Could not extract any media information from this link.")
 
         if 'entries' in info and info['entries']:
@@ -229,7 +297,7 @@ class MediaDownloader:
     ) -> Dict[str, Any]:
         """
         Download media asynchronously.
-        If direct_download_url is provided (from Instagram fallback), downloads stream directly.
+        If direct_download_url is provided (from SnapSave), streams file directly with chunked transfer.
         """
         file_id = uuid.uuid4().hex[:10]
         output_template = str(TEMP_DOWNLOAD_DIR / f"{file_id}_%(title).50s.%(ext)s")
@@ -238,7 +306,7 @@ class MediaDownloader:
         if direct_download_url and media_type == "video":
             dest_file = str(TEMP_DOWNLOAD_DIR / f"{file_id}_video.mp4")
             async with aiohttp.ClientSession() as session:
-                async with session.get(direct_download_url, timeout=60) as resp:
+                async with session.get(direct_download_url, timeout=60, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
                     if resp.status == 200:
                         with open(dest_file, "wb") as f:
                             while True:
@@ -251,12 +319,13 @@ class MediaDownloader:
                             "file_path": dest_file,
                             "file_size": file_size,
                             "file_size_mb": file_size / (1024 * 1024),
-                            "title": "Instagram Video",
+                            "title": "Downloaded Video",
                             "duration": 0,
-                            "uploader": "Instagram",
+                            "uploader": "Social Media",
                             "thumbnail": None
                         }
 
+        # yt-dlp download path
         def _download():
             ydl_opts = {
                 'outtmpl': output_template,
@@ -267,7 +336,7 @@ class MediaDownloader:
                 'retries': 3,
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android', 'ios'],
+                        'player_client': ['ios', 'mweb'],
                     }
                 },
                 'http_headers': {
