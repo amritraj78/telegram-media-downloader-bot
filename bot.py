@@ -6,7 +6,15 @@ import asyncio
 import logging
 import urllib.request
 from typing import Dict, Any, Optional
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedVideo,
+    InlineQueryResultCachedAudio,
+    InputTextMessageContent,
+)
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application,
@@ -14,6 +22,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    InlineQueryHandler,
     ContextTypes,
     filters,
 )
@@ -183,6 +192,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 <b>{to_stylish('ᴛᴏᴛᴀʟ ʀᴇɢɪsᴛᴇʀᴇᴅ ᴜsᴇʀs:')}</b> <code>{stats['total_users']}</code>\n"
         f"📥 <b>{to_stylish('ᴛᴏᴛᴀʟ ᴍᴇᴅɪᴀ ᴅᴏᴡɴʟᴏᴀᴅs:')}</b> <code>{stats['total_downloads']}</code>\n"
         f"⚡ <b>{to_stylish('ᴅᴏᴡɴʟᴏᴀᴅs ᴛᴏᴅᴀʏ:')}</b> <code>{stats['today_downloads']}</code>\n"
+        f"💾 <b>{to_stylish('ɪɴsᴛᴀɴᴛ ᴄᴀᴄʜᴇᴅ ᴍᴇᴅɪᴀ:')}</b> <code>{stats.get('total_cached', 0)}</code>\n"
         f"🚫 <b>{to_stylish('ʙᴀɴɴᴇᴅ ᴜsᴇʀs:')}</b> <code>{stats['banned_users']}</code>\n\n"
         f"👑 <b>{to_stylish('ᴅᴇᴠᴇʟᴏᴘᴇᴅ ʙʏ:')}</b> @{html.escape(OWNER_USERNAME)}"
     )
@@ -208,6 +218,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 <b>{to_stylish('ᴛᴏᴛᴀʟ ᴜsᴇʀs:')}</b> <code>{stats['total_users']}</code>\n"
         f"📥 <b>{to_stylish('ᴛᴏᴛᴀʟ ᴅᴏᴡɴʟᴏᴀᴅs:')}</b> <code>{stats['total_downloads']}</code>\n"
         f"📅 <b>{to_stylish('ᴛᴏᴅᴀʏ\'s ᴛᴀsᴋs:')}</b> <code>{stats['today_downloads']}</code>\n"
+        f"💾 <b>{to_stylish('ᴄᴀᴄʜᴇᴅ ᴠɪᴅᴇᴏs/ᴀᴜᴅɪᴏ:')}</b> <code>{stats.get('total_cached', 0)}</code>\n"
         f"🍪 <b>{to_stylish('ᴄᴏᴏᴋɪᴇs sᴛᴀᴛᴜs:')}</b> {cookie_status}\n\n"
         f"⚙️ <b>{to_stylish('ᴀᴠᴀɪʟᴀʙʟᴇ ᴀᴅᴍɪɴ ᴄᴏᴍᴍᴀɴᴅs:')}</b>\n"
         f"• <code>/setcookies</code> — {to_stylish('ᴜᴘʟᴏᴀᴅ cookies.txt ғɪʟᴇ ᴛᴏ ᴜɴʟᴏᴄᴋ ᴀʟʟ ʀᴇsᴛʀɪᴄᴛɪᴏɴs')}\n"
@@ -395,6 +406,44 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
 
     target_url = sanitize_url(urls[0])
     prune_cache()
+
+    # Feature 3: Instant Zero-CPU & Zero-Bandwidth Cache Delivery (0.1s)
+    cached = db.get_cached_media(target_url)
+    if cached:
+        logger.info(f"Instant SQLite cache hit for URL: {target_url}")
+        file_id = cached["file_id"]
+        media_type = cached.get("media_type", "video")
+        title = cached.get("title", "Media File")
+        duration = cached.get("duration", 0)
+
+        caption = (
+            f"⚡ <b>{to_stylish('ɪɴsᴛᴀɴᴛ ᴄᴀᴄʜᴇ ᴅᴇʟɪᴠᴇʀʏ (0.1s)')}</b> ⚡\n\n"
+            f"🎬 <b>{html.escape(title)}</b>\n\n"
+            f"⚡ {to_stylish('ᴅᴏᴡɴʟᴏᴀᴅᴇᴅ ᴠɪᴀ:')} @String_rebot\n"
+            f"👑 {to_stylish('ᴏᴡɴᴇʀ:')} @{html.escape(OWNER_USERNAME)}"
+        )
+        try:
+            if media_type == "audio":
+                await message.reply_audio(
+                    audio=file_id,
+                    caption=caption,
+                    duration=duration,
+                    reply_markup=get_media_sent_keyboard(),
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await message.reply_video(
+                    video=file_id,
+                    caption=caption,
+                    duration=duration,
+                    supports_streaming=True,
+                    reply_markup=get_media_sent_keyboard(),
+                    parse_mode=ParseMode.HTML
+                )
+            db.increment_download(user.id, "Instant-Cache", media_type)
+            return
+        except Exception as cache_err:
+            logger.warning(f"Cached file_id invalid ({cache_err}), falling back to fresh extraction.")
 
     # Telegram Story Link Handler (e.g. t.me/username/s/123)
     tg_story_match = re.search(r'(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]+)/s/(\d+)', target_url)
@@ -647,7 +696,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         if is_audio:
             with open(file_path, "rb") as f:
-                await context.bot.send_audio(
+                sent_msg = await context.bot.send_audio(
                     chat_id=chat_id,
                     audio=f,
                     title=download_result["title"],
@@ -662,10 +711,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     reply_markup=get_media_sent_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
+            if sent_msg and sent_msg.audio:
+                db.set_cached_media(
+                    url,
+                    sent_msg.audio.file_id,
+                    "audio",
+                    download_result["title"],
+                    download_result["duration"]
+                )
             db.increment_download(query.from_user.id, media_data.get("extractor", "Web"), "audio")
         else:
             with open(file_path, "rb") as f:
-                await context.bot.send_video(
+                sent_msg = await context.bot.send_video(
                     chat_id=chat_id,
                     video=f,
                     caption=(
@@ -678,6 +735,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     supports_streaming=True,
                     reply_markup=get_media_sent_keyboard(),
                     parse_mode=ParseMode.HTML
+                )
+            if sent_msg and sent_msg.video:
+                db.set_cached_media(
+                    url,
+                    sent_msg.video.file_id,
+                    "video",
+                    download_result["title"],
+                    download_result["duration"]
                 )
             db.increment_download(query.from_user.id, media_data.get("extractor", "Web"), "video")
 
@@ -698,6 +763,113 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if file_path:
             downloader.cleanup_files(file_path)
         MEDIA_CACHE.pop(task_id, None)
+
+
+async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Feature 2: Inline Mode Anywhere.
+    Allows users to download or share media directly in any chat/group using @String_rebot <link>!
+    """
+    inline_query = update.inline_query
+    if not inline_query:
+        return
+
+    query_text = (inline_query.query or "").strip()
+    results = []
+
+    if not query_text:
+        # User opened inline mode without query: show informative guide card
+        results.append(
+            InlineQueryResultArticle(
+                id="inline_guide",
+                title=to_stylish("⚡ ᴜʟᴛʀᴀ-ғᴀsᴛ ᴍᴇᴅɪᴀ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ"),
+                description=to_stylish("ᴘᴀsᴛᴇ ᴀɴʏ ᴠɪᴅᴇᴏ ᴏʀ ᴀᴜᴅɪᴏ ᴜʀʟ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ ɪɴsᴛᴀɴᴛʟʏ!"),
+                input_message_content=InputTextMessageContent(
+                    f"🚀 <b>{to_stylish('ᴜsᴇ @String_rebot ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ ᴠɪᴅᴇᴏs ᴀɴʏᴡʜᴇʀᴇ!')}</b>\n\n"
+                    f"✨ {to_stylish('sᴜᴘᴘᴏʀᴛs: ɪɴsᴛᴀɢʀᴀᴍ, ʏᴏᴜᴛᴜʙᴇ, ᴘɪɴᴛᴇʀᴇsᴛ, ғᴀᴄᴇʙᴏᴏᴋ, x, sɴᴀᴘᴄʜᴀᴛ, ᴛᴇʟᴇɢʀᴀᴍ & ᴍᴏʀᴇ!')}\n\n"
+                    f"👑 {to_stylish('ᴏᴡɴᴇʀ:')} @{html.escape(OWNER_USERNAME)}",
+                    parse_mode=ParseMode.HTML
+                ),
+                reply_markup=get_social_keyboard()
+            )
+        )
+        await inline_query.answer(results, cache_time=10)
+        return
+
+    urls = extract_urls(query_text)
+    if not urls:
+        results.append(
+            InlineQueryResultArticle(
+                id="no_link",
+                title=to_stylish("⚠️ ɴᴏ ᴠᴀʟɪᴅ ʟɪɴᴋ ғᴏᴜɴᴅ"),
+                description=to_stylish("ᴘʟᴇᴀsᴇ ᴘᴀsᴛᴇ ᴀ ᴠᴀʟɪᴅ ᴍᴇᴅɪᴀ ᴜʀʟ (ɪɴsᴛᴀɢʀᴀᴍ, ʏᴏᴜᴛᴜʙᴇ, ᴘɪɴᴛᴇʀᴇsᴛ, ᴇᴛᴄ.)"),
+                input_message_content=InputTextMessageContent(
+                    f"⚠️ {to_stylish('ᴘʟᴇᴀsᴇ ᴘʀᴏᴠɪᴅᴇ ᴀ ᴠᴀʟɪᴅ ᴜʀʟ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ ᴍᴇᴅɪᴀ.')}",
+                    parse_mode=ParseMode.HTML
+                )
+            )
+        )
+        await inline_query.answer(results, cache_time=10)
+        return
+
+    clean_url = sanitize_url(urls[0])
+    cached = db.get_cached_media(clean_url)
+
+    if cached:
+        # INSTANT ZERO-LATENCY INLINE CACHE DELIVERY!
+        file_id = cached["file_id"]
+        media_type = cached.get("media_type", "video")
+        title = cached.get("title", "Cached Media")
+
+        caption = (
+            f"⚡ <b>{to_stylish('ɪɴsᴛᴀɴᴛ ᴄᴀᴄʜᴇ ᴅᴇʟɪᴠᴇʀʏ (0.1s)')}</b> ⚡\n\n"
+            f"🎬 <b>{html.escape(title)}</b>\n\n"
+            f"⚡ {to_stylish('ᴅᴏᴡɴʟᴏᴀᴅᴇᴅ ᴠɪᴀ:')} @String_rebot\n"
+            f"👑 {to_stylish('ᴏᴡɴᴇʀ:')} @{html.escape(OWNER_USERNAME)}"
+        )
+
+        if media_type == "audio":
+            results.append(
+                InlineQueryResultCachedAudio(
+                    id=f"ca_{int(time.time())}",
+                    audio_file_id=file_id,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_media_sent_keyboard()
+                )
+            )
+        else:
+            results.append(
+                InlineQueryResultCachedVideo(
+                    id=f"cv_{int(time.time())}",
+                    video_file_id=file_id,
+                    title=f"⚡ {title}",
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_media_sent_keyboard()
+                )
+            )
+    else:
+        # Direct deep-link to download via bot
+        results.append(
+            InlineQueryResultArticle(
+                id=f"dl_{int(time.time())}",
+                title=to_stylish("⚡ ᴅᴏᴡɴʟᴏᴀᴅ ᴠɪᴀ @String_rebot"),
+                description=f"{clean_url[:50]}...",
+                input_message_content=InputTextMessageContent(
+                    f"🎬 <b>{to_stylish('ᴍᴇᴅɪᴀ ᴅᴏᴡɴʟᴏᴀᴅ ʀᴇǫᴜᴇsᴛ')}</b>\n\n"
+                    f"🔗 <code>{html.escape(clean_url)}</code>\n\n"
+                    f"⚡ {to_stylish('ᴄʟɪᴄᴋ ʙᴇʟᴏᴡ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ ɪɴ ʜᴅ ᴏʀ ᴇxᴛʀᴀᴄᴛ ᴍᴘ3:')}",
+                    parse_mode=ParseMode.HTML
+                ),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(to_stylish("📥 ᴏᴘᴇɴ ʙᴏᴛ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ"), url=f"https://t.me/String_rebot?start=help")],
+                    [InlineKeyboardButton(to_stylish("📢 ᴜᴘᴅᴀᴛᴇs ᴄʜᴀɴɴᴇʟ"), url=OWNER_CHANNEL_LINK)]
+                ])
+            )
+        )
+
+    await inline_query.answer(results, cache_time=10)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -745,6 +917,9 @@ def main():
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
+
+    # Inline mode query handler (Feature 2)
+    application.add_handler(InlineQueryHandler(handle_inline_query))
 
     # Document handler (for cookies upload)
     application.add_handler(MessageHandler(filters.Document.ALL, handle_incoming_message))

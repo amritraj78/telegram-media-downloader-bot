@@ -45,6 +45,18 @@ class Database:
                     downloaded_at REAL
                 )
             """)
+
+            # Media cache for Zero-RAM & Zero-CPU instant duplicate delivery
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS media_cache (
+                    url TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    title TEXT,
+                    duration INTEGER DEFAULT 0,
+                    created_at REAL
+                )
+            """)
             conn.commit()
 
     def add_or_update_user(self, user_id: int, username: Optional[str], first_name: Optional[str]):
@@ -108,12 +120,42 @@ class Database:
             cursor.execute("SELECT COUNT(*) as today_downloads FROM download_logs WHERE downloaded_at >= ?", (start_of_today,))
             today_downloads = cursor.fetchone()["today_downloads"]
 
+            cursor.execute("SELECT COUNT(*) as total_cached FROM media_cache")
+            total_cached = cursor.fetchone()["total_cached"]
+
             return {
                 "total_users": total_users,
                 "banned_users": banned_users,
                 "total_downloads": total_downloads,
-                "today_downloads": today_downloads
+                "today_downloads": today_downloads,
+                "total_cached": total_cached
             }
+
+    def get_cached_media(self, url: str) -> Optional[Dict[str, Any]]:
+        """Returns cached file_id and metadata for zero-bandwidth duplicate delivery."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM media_cache WHERE url = ?", (url,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
+    def set_cached_media(self, url: str, file_id: str, media_type: str, title: str, duration: int = 0):
+        """Stores Telegram file_id to serve instant duplicate downloads with zero CPU."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO media_cache (url, file_id, media_type, title, duration, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    file_id = excluded.file_id,
+                    media_type = excluded.media_type,
+                    title = excluded.title,
+                    duration = excluded.duration,
+                    created_at = excluded.created_at
+            """, (url, file_id, media_type, title, duration, time.time()))
+            conn.commit()
 
 
 db = Database()

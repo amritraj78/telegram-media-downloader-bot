@@ -540,11 +540,17 @@ class MediaDownloader:
             if media_type == "audio":
                 ydl_opts.update({
                     'format': 'bestaudio/best',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
+                    'postprocessors': [
+                        {
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        },
+                        {
+                            'key': 'FFmpegMetadata',
+                            'add_metadata': True,
+                        }
+                    ],
                 })
             else:
                 if quality == "best":
@@ -611,9 +617,12 @@ class MediaDownloader:
         async with aiohttp.ClientSession() as session:
             async with session.get(image_url, timeout=20) as resp:
                 if resp.status == 200:
-                    data = await resp.read()
                     with open(dest_path, "wb") as f:
-                        f.write(data)
+                        while True:
+                            chunk = await resp.content.read(1024 * 32)
+                            if not chunk:
+                                break
+                            f.write(chunk)
                     return str(dest_path)
                 else:
                     raise Exception(f"Failed to download image. HTTP {resp.status}")
