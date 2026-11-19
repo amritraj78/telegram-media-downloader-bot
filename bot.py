@@ -394,6 +394,29 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
     target_url = sanitize_url(urls[0])
     prune_cache()
 
+    # Telegram Public Message Link Handler
+    tg_match = re.search(r'(?:https?://)?(?:www\.)?t\.me/(?:c/)?([a-zA-Z0-9_]+)/(\d+)', target_url)
+    if tg_match and not ("t.me/+" in target_url or "joinchat" in target_url):
+        channel_id = tg_match.group(1)
+        post_id = int(tg_match.group(2))
+        try:
+            status_msg = await message.reply_text(
+                f"⚡ <i>{to_stylish('ғᴇᴛᴄʜɪɴɢ ᴛᴇʟᴇɢʀᴀᴍ ᴍᴇᴅɪᴀ...')}</i>",
+                parse_mode=ParseMode.HTML
+            )
+            await context.bot.copy_message(
+                chat_id=message.chat_id,
+                from_chat_id=f"@{channel_id}",
+                message_id=post_id,
+                reply_markup=get_media_sent_keyboard()
+            )
+            await status_msg.delete()
+            db.increment_download(user.id, "Telegram", "direct")
+            return
+        except Exception as tg_err:
+            logger.warning(f"Telegram copy_message failed: {tg_err}")
+            # Fall back to standard extractor if copy fails
+
     status_msg = await message.reply_text(
         f"⚡ <i>{to_stylish('ᴀɴᴀʟʏᴢɪɴɢ ʏᴏᴜʀ ʟɪɴᴋ... ᴘʟᴇᴀsᴇ ᴡᴀɪᴛ.')}</i>",
         parse_mode=ParseMode.HTML,

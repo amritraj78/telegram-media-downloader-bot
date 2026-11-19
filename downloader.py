@@ -183,8 +183,104 @@ def extract_snapsave_media(url: str) -> Optional[Dict[str, Any]]:
             "qualities": ["best"],
             "raw_info": {}
         }
+def extract_snapchat_media(url: str) -> Optional[Dict[str, Any]]:
+    """Extracts direct CDN MP4 video from Snapchat Spotlight."""
+    try:
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+            )
+        }
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            html_text = resp.read().decode('utf-8', errors='ignore')
+
+        cdn_urls = re.findall(r'https://cf-st\.sc-cdn\.net/[^\s\"\'<>]+', html_text)
+        video_candidates = [u for u in cdn_urls if '.27.' in u or 'SpotlightSharing' in u]
+        if not video_candidates:
+            return None
+
+        video_url = video_candidates[0]
+        title_m = re.search(r'<title>([^<]+)</title>', html_text)
+        title = title_m.group(1).replace(' | Snapchat', '').strip() if title_m else "Snapchat Spotlight"
+
+        return {
+            "url": url,
+            "direct_download_url": video_url,
+            "title": title[:60],
+            "duration": 0,
+            "duration_str": "HD",
+            "thumbnail": None,
+            "uploader": "Snapchat Creator",
+            "extractor": "Snapchat",
+            "is_image": False,
+            "image_url": None,
+            "qualities": ["best"],
+            "raw_info": {}
+        }
     except Exception as e:
-        logger.warning(f"SnapSave extraction exception: {e}")
+        logger.warning(f"Snapchat extraction exception: {e}")
+        return None
+
+
+def extract_pinterest_media(url: str) -> Optional[Dict[str, Any]]:
+    """Extracts direct HD MP4 video or original photo from Pinterest and pin.it links."""
+    try:
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+            )
+        }
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            html_text = resp.read().decode('utf-8', errors='ignore')
+
+        # Check for Video
+        video_urls = re.findall(r'https://v1\.pinimg\.com/videos/[^\s\"\'<>]+', html_text)
+        if video_urls:
+            raw_vid = video_urls[0]
+            clean_vid = raw_vid.replace('hls', '720p').replace('m3u8', 'mp4').split('?')[0]
+            title_m = re.search(r'<title>([^<]+)</title>', html_text)
+            title = title_m.group(1).replace(' - Pinterest', '').strip() if title_m else "Pinterest Video"
+            return {
+                "url": url,
+                "direct_download_url": clean_vid,
+                "title": title[:60],
+                "duration": 0,
+                "duration_str": "HD",
+                "thumbnail": None,
+                "uploader": "Pinterest Creator",
+                "extractor": "Pinterest",
+                "is_image": False,
+                "image_url": None,
+                "qualities": ["best"],
+                "raw_info": {}
+            }
+
+        # Check for Original Photo
+        images = list(set(re.findall(r'https://i\.pinimg\.com/originals/[^\"\')\s]+', html_text)))
+        if images:
+            title_m = re.search(r'<title>([^<]+)</title>', html_text)
+            title = title_m.group(1).replace(' - Pinterest', '').strip() if title_m else "Pinterest Image"
+            return {
+                "url": url,
+                "direct_download_url": None,
+                "title": title[:60],
+                "duration": 0,
+                "duration_str": "Photo",
+                "thumbnail": images[0],
+                "uploader": "Pinterest",
+                "extractor": "Pinterest",
+                "is_image": True,
+                "image_url": images[0],
+                "qualities": ["best"],
+                "raw_info": {}
+            }
+        return None
+    except Exception as e:
+        logger.warning(f"Pinterest extraction exception: {e}")
         return None
 
 
@@ -236,13 +332,19 @@ class MediaDownloader:
         is_instagram = bool(INSTAGRAM_PATTERN.search(clean_url))
         is_facebook = bool(FACEBOOK_PATTERN.search(clean_url))
 
-        # Instagram & Facebook: SnapSave first (bypasses datacenter block)
-        if is_instagram or is_facebook:
-            logger.info(f"Running high-speed SnapSave engine for: {clean_url}")
-            snapsave_result = await asyncio.to_thread(extract_snapsave_media, clean_url)
-            if snapsave_result and snapsave_result.get("direct_download_url"):
-                logger.info("SnapSave successfully extracted direct media URL!")
-                return snapsave_result
+        # Snapchat Spotlight: Direct CDN extraction
+        if "snapchat.com/spotlight" in clean_url:
+            logger.info(f"Running high-speed Snapchat extractor for: {clean_url}")
+            snap_res = await asyncio.to_thread(extract_snapchat_media, clean_url)
+            if snap_res:
+                return snap_res
+
+        # Pinterest: Direct Video & Photo extraction
+        if "pinterest.com" in clean_url or "pin.it" in clean_url:
+            logger.info(f"Running high-speed Pinterest extractor for: {clean_url}")
+            pin_res = await asyncio.to_thread(extract_pinterest_media, clean_url)
+            if pin_res:
+                return pin_res
 
         # Primary yt-dlp extraction with clean URL
         def _extract():
