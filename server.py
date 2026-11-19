@@ -237,10 +237,12 @@ async def api_test_handler(request):
             "status": "success",
             "title": info.get("title"),
             "duration": info.get("duration"),
+            "thumbnail": info.get("thumbnail"),
             "extractor": info.get("extractor"),
             "qualities": info.get("qualities"),
             "is_image": info.get("is_image"),
-            "direct_download_url": bool(info.get("direct_download_url"))
+            "direct_download_url": bool(info.get("direct_download_url")),
+            "download_url": info.get("direct_download_url") or info.get("image_url")
         }
     except Exception as exc:
         result["fetch"] = {
@@ -249,15 +251,39 @@ async def api_test_handler(request):
             "error_message": str(exc)
         }
 
-    return web.json_response(result)
+    return web.json_response(result, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*"
+    })
+
+
+@web.middleware
+async def cors_middleware(request, handler):
+    if request.method == "OPTIONS":
+        return web.Response(headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        })
+    response = await handler(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 
 async def start_web_server():
     """Starts the background aiohttp web server on the assigned port."""
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/", root_handler)
     app.router.add_get("/health", health_check_handler)
     app.router.add_get("/api/test", api_test_handler)
+    app.router.add_options("/api/test", lambda r: web.Response(headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*"
+    }))
 
     runner = web.AppRunner(app)
     await runner.setup()
