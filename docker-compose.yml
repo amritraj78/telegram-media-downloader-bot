@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  telegram-downloader-bot:
+    build: .
+    container_name: telegram_media_downloader
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - PORT=8000
+      - MAX_CONCURRENT_DOWNLOADS=3
+      - MAX_FILE_SIZE_MB=50
+    volumes:
+      - ./downloads:/app/downloads
+    env_file:
+      - .env
