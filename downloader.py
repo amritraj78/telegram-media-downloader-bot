@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 import yt_dlp
 import aiohttp
-from config import TEMP_DOWNLOAD_DIR, COOKIES_FILE, MAX_FILE_SIZE_MB, logger
+from config import TEMP_DOWNLOAD_DIR, BASE_DIR, MAX_FILE_SIZE_MB, logger
+
+COOKIES_PATH = BASE_DIR / "cookies.txt"
 
 URL_PATTERN = re.compile(
     r'(https?://(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|'
@@ -27,12 +29,42 @@ FACEBOOK_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+YOUTUBE_PATTERN = re.compile(
+    r'(?:https?://)?(?:www\.)?(?:youtube\.com/(?:shorts/|watch\?v=)|youtu\.be/)([A-Za-z0-9_-]+)',
+    re.IGNORECASE
+)
+
 
 def extract_urls(text: str) -> List[str]:
     """Extract all URLs from a given message text."""
     if not text:
         return []
     return URL_PATTERN.findall(text)
+
+
+def sanitize_url(url: str) -> str:
+    """Strips tracking query parameters from Instagram and YouTube URLs."""
+    # Instagram clean canonical URL
+    m_ig = re.search(r'(https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+)', url)
+    if m_ig:
+        return m_ig.group(1) + '/'
+
+    # YouTube Shorts clean canonical URL
+    m_yt_short = re.search(r'(https?://(?:www\.)?youtube\.com/shorts/[A-Za-z0-9_-]+)', url)
+    if m_yt_short:
+        return m_yt_short.group(1)
+
+    # YouTube Watch clean URL
+    m_yt_watch = re.search(r'(https?://(?:www\.)?youtube\.com/watch\?v=[A-Za-z0-9_-]+)', url)
+    if m_yt_watch:
+        return m_yt_watch.group(1)
+
+    # youtu.be clean URL
+    m_yt_be = re.search(r'(https?://youtu\.be/[A-Za-z0-9_-]+)', url)
+    if m_yt_be:
+        return m_yt_be.group(1)
+
+    return url
 
 
 def format_duration(seconds: Optional[int]) -> str:
@@ -96,11 +128,12 @@ def _decode_snapsave(h: str, u: int, n: str, t: int, e: int) -> str:
 
 def extract_snapsave_media(url: str) -> Optional[Dict[str, Any]]:
     """
-    Extracts direct CDN media URLs via SnapSave engine.
+    Extracts direct CDN media URLs via SnapSave engine with sanitized URLs.
     Bypasses Instagram & Facebook datacenter IP blocks completely.
     """
+    clean_url = sanitize_url(url)
     try:
-        data = urllib.parse.urlencode({'url': url}).encode('utf-8')
+        data = urllib.parse.urlencode({'url': clean_url}).encode('utf-8')
         headers = {
             'User-Agent': (
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -120,16 +153,13 @@ def extract_snapsave_media(url: str) -> Optional[Dict[str, Any]]:
         h, u, n, t, e, _ = match.groups()
         decoded = _decode_snapsave(h, int(u), n, int(t), int(e))
 
-        # Check for error in response
         if "Error:" in decoded:
-            logger.warning(f"SnapSave returned error for {url}")
+            logger.warning(f"SnapSave returned error for {clean_url}")
             return None
 
-        # Look for rapidcdn or direct download links
         rapid_urls = re.findall(r'https://d\.rapidcdn\.app/v2\?token=[^\s\"\'<>]+', decoded)
         thumb_urls = re.findall(r'https://d\.rapidcdn\.app/thumb\?token=[^\s\"\'<>]+', decoded)
 
-        # Fallback to any direct video href
         if not rapid_urls:
             rapid_urls = re.findall(r'href=\\?\"(https?://[^\s\"\'<>]+)\\?\"', decoded)
 
@@ -140,7 +170,7 @@ def extract_snapsave_media(url: str) -> Optional[Dict[str, Any]]:
         thumb_url = thumb_urls[0].replace('\\\\', '').rstrip('\\\"') if thumb_urls else None
 
         return {
-            "url": url,
+            "url": clean_url,
             "direct_download_url": video_url,
             "title": "Social Video",
             "duration": 0,
@@ -163,7 +193,7 @@ class MediaDownloader:
         self.download_semaphore = asyncio.Semaphore(4)
 
     def _get_base_ydl_opts(self) -> Dict[str, Any]:
-        """Options for yt-dlp with mobile player client for YouTube."""
+        """Options for yt-dlp with TV embedded & mweb player clients for YouTube."""
         opts = {
             'quiet': True,
             'no_warnings': True,
@@ -172,10 +202,10 @@ class MediaDownloader:
             'noplaylist': True,
             'socket_timeout': 15,
             'retries': 2,
-            # YouTube: Use iOS & mweb clients to avoid PO Token requirement
+            # YouTube: Use tv_embedded & mweb to avoid PO Token requirement
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['ios', 'mweb'],
+                    'player_client': ['tv_embedded', 'mweb', 'android', 'ios'],
                 },
                 'instagram': {
                     'include_logged_out': True,
@@ -189,45 +219,47 @@ class MediaDownloader:
                 'Accept-Language': 'en-US,en;q=0.9',
             }
         }
-        if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-            opts['cookiefile'] = COOKIES_FILE
+        # Dynamic cookie detection
+        if os.path.exists(COOKIES_PATH):
+            opts['cookiefile'] = str(COOKIES_PATH)
         return opts
 
     async def fetch_media_info(self, url: str) -> Dict[str, Any]:
         """
         Extract media information without downloading the full media file.
-        Uses SnapSave proxy first for Instagram and Facebook, with yt-dlp as fallback.
+        Uses SnapSave first for Instagram and Facebook with sanitized URL.
         """
-        is_instagram = bool(INSTAGRAM_PATTERN.search(url))
-        is_facebook = bool(FACEBOOK_PATTERN.search(url))
+        clean_url = sanitize_url(url)
+        is_instagram = bool(INSTAGRAM_PATTERN.search(clean_url))
+        is_facebook = bool(FACEBOOK_PATTERN.search(clean_url))
 
-        # For Instagram and Facebook: Run SnapSave in parallel or first to bypass datacenter IP blocks!
+        # Instagram & Facebook: SnapSave first (bypasses datacenter block)
         if is_instagram or is_facebook:
-            logger.info(f"Running high-speed SnapSave engine for: {url}")
-            snapsave_result = await asyncio.to_thread(extract_snapsave_media, url)
+            logger.info(f"Running high-speed SnapSave engine for: {clean_url}")
+            snapsave_result = await asyncio.to_thread(extract_snapsave_media, clean_url)
             if snapsave_result and snapsave_result.get("direct_download_url"):
                 logger.info("SnapSave successfully extracted direct media URL!")
                 return snapsave_result
 
-        # Primary yt-dlp extraction
+        # Primary yt-dlp extraction with clean URL
         def _extract():
             opts = self._get_base_ydl_opts()
             with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=False)
+                return ydl.extract_info(clean_url, download=False)
 
         info = None
         try:
             info = await asyncio.to_thread(_extract)
         except Exception as e:
-            logger.warning(f"Primary yt-dlp extraction failed for {url}: {e}")
-            # Try SnapSave if not attempted yet
-            snapsave_result = await asyncio.to_thread(extract_snapsave_media, url)
+            logger.warning(f"Primary yt-dlp extraction failed for {clean_url}: {e}")
+            # Try SnapSave as last resort
+            snapsave_result = await asyncio.to_thread(extract_snapsave_media, clean_url)
             if snapsave_result and snapsave_result.get("direct_download_url"):
                 return snapsave_result
             raise e
 
         if not info:
-            snapsave_result = await asyncio.to_thread(extract_snapsave_media, url)
+            snapsave_result = await asyncio.to_thread(extract_snapsave_media, clean_url)
             if snapsave_result and snapsave_result.get("direct_download_url"):
                 return snapsave_result
             raise ValueError("Could not extract any media information from this link.")
@@ -275,7 +307,7 @@ class MediaDownloader:
             offered_qualities = ["best"]
 
         return {
-            "url": url,
+            "url": clean_url,
             "title": title,
             "duration": duration,
             "duration_str": format_duration(duration),
@@ -301,6 +333,7 @@ class MediaDownloader:
         """
         file_id = uuid.uuid4().hex[:10]
         output_template = str(TEMP_DOWNLOAD_DIR / f"{file_id}_%(title).50s.%(ext)s")
+        clean_url = sanitize_url(url)
 
         # Fast direct download path if direct CDN link is provided
         if direct_download_url and media_type == "video":
@@ -336,7 +369,7 @@ class MediaDownloader:
                 'retries': 3,
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['ios', 'mweb'],
+                        'player_client': ['tv_embedded', 'mweb', 'android', 'ios'],
                     }
                 },
                 'http_headers': {
@@ -347,8 +380,8 @@ class MediaDownloader:
                 }
             }
 
-            if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-                ydl_opts['cookiefile'] = COOKIES_FILE
+            if os.path.exists(COOKIES_PATH):
+                ydl_opts['cookiefile'] = str(COOKIES_PATH)
 
             if media_type == "audio":
                 ydl_opts.update({
@@ -375,7 +408,7 @@ class MediaDownloader:
                 ydl_opts['merge_output_format'] = 'mp4'
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = ydl.extract_info(clean_url, download=True)
                 if 'entries' in info and info['entries']:
                     info = info['entries'][0]
 
