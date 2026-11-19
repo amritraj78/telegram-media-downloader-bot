@@ -11,6 +11,23 @@ import yt_dlp
 import aiohttp
 from config import TEMP_DOWNLOAD_DIR, BASE_DIR, MAX_FILE_SIZE_MB, logger
 
+# Setup FFmpeg & FFprobe path automatically via imageio-ffmpeg / static-ffmpeg
+FFMPEG_LOCATION = None
+try:
+    import imageio_ffmpeg
+    FFMPEG_LOCATION = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_dir = os.path.dirname(FFMPEG_LOCATION)
+    if ffmpeg_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = f"{ffmpeg_dir}:{os.environ.get('PATH', '')}"
+except Exception:
+    pass
+
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 COOKIES_PATH = BASE_DIR / "cookies.txt"
 
 URL_PATTERN = re.compile(
@@ -233,20 +250,38 @@ def extract_pinterest_media(url: str) -> Optional[Dict[str, Any]]:
                 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
             )
         }
-        req = urllib.request.Request(url, headers=headers)
+        target_url = url
+        # Follow pin.it shortlinks
+        if "pin.it" in url:
+            try:
+                pin_code = url.strip('/').split('/')[-1]
+                shortener_url = f"https://api.pinterest.com/url_shortener/{pin_code}/redirect/"
+                req_short = urllib.request.Request(shortener_url, headers=headers)
+                with urllib.request.urlopen(req_short, timeout=8) as r_short:
+                    target_url = r_short.geturl()
+            except Exception:
+                pass
+
+        req = urllib.request.Request(target_url, headers=headers)
         with urllib.request.urlopen(req, timeout=12) as resp:
             html_text = resp.read().decode('utf-8', errors='ignore')
 
-        # Check for Video
-        video_urls = re.findall(r'https://v1\.pinimg\.com/videos/[^\s\"\'<>]+', html_text)
-        if video_urls:
-            raw_vid = video_urls[0]
-            clean_vid = raw_vid.replace('hls', '720p').replace('m3u8', 'mp4').split('?')[0]
+        # Check for direct pre-merged MP4 video first
+        direct_mp4s = re.findall(r'https://v1\.pinimg\.com/videos/[^\s\"\'<>]+\.mp4', html_text)
+        video_url = None
+        if direct_mp4s:
+            video_url = direct_mp4s[0].split('?')[0]
+        else:
+            video_urls = re.findall(r'https://v1\.pinimg\.com/videos/[^\s\"\'<>]+', html_text)
+            if video_urls:
+                video_url = video_urls[0].replace('hls', '720p').replace('m3u8', 'mp4').split('?')[0]
+
+        if video_url:
             title_m = re.search(r'<title>([^<]+)</title>', html_text)
             title = title_m.group(1).replace(' - Pinterest', '').strip() if title_m else "Pinterest Video"
             return {
                 "url": url,
-                "direct_download_url": clean_vid,
+                "direct_download_url": video_url,
                 "title": title[:60],
                 "duration": 0,
                 "duration_str": "HD",
@@ -321,6 +356,9 @@ class MediaDownloader:
         # Dynamic cookie detection
         if os.path.exists(COOKIES_PATH):
             opts['cookiefile'] = str(COOKIES_PATH)
+
+        if FFMPEG_LOCATION:
+            opts['ffmpeg_location'] = FFMPEG_LOCATION
         return opts
 
     async def fetch_media_info(self, url: str) -> Dict[str, Any]:
@@ -490,6 +528,9 @@ class MediaDownloader:
 
             if os.path.exists(COOKIES_PATH):
                 ydl_opts['cookiefile'] = str(COOKIES_PATH)
+
+            if FFMPEG_LOCATION:
+                ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
 
             if media_type == "audio":
                 ydl_opts.update({

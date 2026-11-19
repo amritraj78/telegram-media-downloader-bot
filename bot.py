@@ -394,6 +394,41 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
     target_url = sanitize_url(urls[0])
     prune_cache()
 
+    # Telegram Story Link Handler (e.g. t.me/username/s/123)
+    tg_story_match = re.search(r'(?:https?://)?(?:www\.)?t\.me/([a-zA-Z0-9_]+)/s/(\d+)', target_url)
+    if tg_story_match:
+        story_user = tg_story_match.group(1)
+        story_id = tg_story_match.group(2)
+        try:
+            status_msg = await message.reply_text(
+                f"⚡ <i>{to_stylish('ғᴇᴛᴄʜɪɴɢ ᴛᴇʟᴇɢʀᴀᴍ ꜱᴛᴏʀʏ...')}</i>",
+                parse_mode=ParseMode.HTML
+            )
+            req_story = urllib.request.Request(target_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req_story, timeout=8) as r_s:
+                s_html = r_s.read().decode('utf-8', errors='ignore')
+            cover_m = re.search(r'<img class=\"tgme_page_photo_image\" src=\"([^\"]+)\">', s_html)
+            if cover_m:
+                cover_url = cover_m.group(1)
+                caption = (
+                    f"👻 <b>{to_stylish('ᴛᴇʟᴇɢʀᴀᴍ ꜱᴛᴏʀʏ ᴄᴏᴠᴇʀ')}</b>\n\n"
+                    f"👤 {to_stylish('ᴜꜱᴇʀ:')} @{html.escape(story_user)}\n"
+                    f"🆔 {to_stylish('ꜱᴛᴏʀʏ ɪᴅ:')} <code>#{story_id}</code>\n\n"
+                    f"💡 <i>{to_stylish('ᴛᴇʟᴇɢʀᴀᴍ ꜱᴛᴏʀɪᴇꜱ ᴀʀᴇ ᴘʀɪᴠᴀᴛᴇ ɪɴꜱɪᴅᴇ ᴛᴇʟᴇɢʀᴀᴍ ᴀᴘᴘ. ᴄʜᴀɴɴᴇʟ ᴘᴏꜱᴛꜱ (t.me/channel/123) ᴀʀᴇ 100% ꜱᴜᴘᴘᴏʀᴛᴇᴅ!')}</i>\n\n"
+                    f"👑 {to_stylish('ᴏᴡɴᴇʀ:')} @{html.escape(OWNER_USERNAME)}"
+                )
+                await message.reply_photo(
+                    photo=cover_url,
+                    caption=caption,
+                    reply_markup=get_media_sent_keyboard(),
+                    parse_mode=ParseMode.HTML
+                )
+                await status_msg.delete()
+                db.increment_download(user.id, "Telegram", "story_preview")
+                return
+        except Exception as e:
+            logger.warning(f"Telegram story scrape failed: {e}")
+
     # Telegram Public Message Link Handler
     tg_match = re.search(r'(?:https?://)?(?:www\.)?t\.me/(?:c/)?([a-zA-Z0-9_]+)/(\d+)', target_url)
     if tg_match and not ("t.me/+" in target_url or "joinchat" in target_url):
